@@ -20,6 +20,8 @@ docker compose exec postgres create_db_psql.sh \
 Вызов срабатывания скрипта является идемпотентным
 </details>
 
+---
+
 <details>
 <summary><strong>Make commands</strong></summary>
 
