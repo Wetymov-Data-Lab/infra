@@ -1,0 +1,51 @@
+services:
+  redis:
+    image: ${REDIS_IMAGE}
+    container_name: ${REDIS_CONTAINER_NAME}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    ports:
+      - "${REDIS_HOST}:${REDIS_EXPOSE_PORT}:6379"
+    networks:
+      - vendor-network
+    volumes:
+      - redis_vendor_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: ${POSTGRES_CONTAINER_NAME}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_HOST}:${POSTGRES_EXPOSE_PORT}:5432"
+    networks:
+      - vendor-network
+    volumes:
+      - postgres17_data:/var/lib/postgresql/data
+      - ./helpers/db/create_db_psql.sh:/usr/local/bin/create_db_psql.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+networks:
+  vendor-network:
+    name: ${VENDOR_NETWORK_NAME}
+
+volumes:
+  redis_vendor_data:
+    name: ${REDIS_VOLUME_NAME}
+  postgres17_data:
+    name: ${POSTGRES_VOLUME_NAME}
