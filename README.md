@@ -7,8 +7,13 @@
 make up
 ```
 
-Скрипты приложений, запущенных в Docker, подключаются к PostgreSQL по адресу
-`postgres:5432` через общую сеть `vendor-network`.
+Сервисы приложений, запущенные в Docker, доступны через общую сеть
+`vendor-network`:
+
+- PostgreSQL — `postgres:5432`;
+- Redis — `redis:6379`;
+- MinIO API — `minio:9000`, консоль — `minio:9001`;
+- ClickHouse HTTP — `clickhouse:8123`, native protocol — `clickhouse:9000`.
 
 Чтобы создать отдельного пользователя и принадлежащую ему базу данных:
 
@@ -38,5 +43,5 @@ docker compose exec postgres create_db_psql.sh \
 | `make pull`    | Загрузить образы сервисов                     | `docker compose pull`                            |
 | `make config`  | Проверить и вывести итоговую конфигурацию     | `docker compose config`                          |
 
-`make down` не удаляет тома с данными PostgreSQL и Redis.
+`make down` не удаляет тома с данными PostgreSQL, Redis, MinIO и ClickHouse.
 </details>

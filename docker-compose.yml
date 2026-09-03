@@ -33,8 +33,54 @@ services:
     volumes:
       - postgres17_data:/var/lib/postgresql/data
       - ./helpers/db/create_db_psql.sh:/usr/local/bin/create_db_psql.sh:ro
+      - ./helpers/db/create_db_psql.sql:/usr/local/bin/create_db_psql.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+  minio:
+    image: ${MINIO_IMAGE}
+    container_name: ${MINIO_CONTAINER_NAME}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_HOST}:${MINIO_API_EXPOSE_PORT}:9000"
+      - "${MINIO_HOST}:${MINIO_CONSOLE_EXPOSE_PORT}:9001"
+    networks:
+      - vendor-network
+    volumes:
+      - minio_vendor_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE}
+    container_name: ${CLICKHOUSE_CONTAINER_NAME}
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HOST}:${CLICKHOUSE_HTTP_EXPOSE_PORT}:8123"
+      - "${CLICKHOUSE_HOST}:${CLICKHOUSE_NATIVE_EXPOSE_PORT}:9000"
+    networks:
+      - vendor-network
+    volumes:
+      - clickhouse_vendor_data:/var/lib/clickhouse
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - clickhouse-client --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1"
       interval: ${HEALTHCHECK_INTERVAL}
       timeout: ${HEALTHCHECK_TIMEOUT}
       retries: ${HEALTHCHECK_RETRIES}
@@ -49,3 +95,7 @@ volumes:
     name: ${REDIS_VOLUME_NAME}
   postgres17_data:
     name: ${POSTGRES_VOLUME_NAME}
+  minio_vendor_data:
+    name: ${MINIO_VOLUME_NAME}
+  clickhouse_vendor_data:
+    name: ${CLICKHOUSE_VOLUME_NAME}
