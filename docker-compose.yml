@@ -7,7 +7,7 @@ services:
       - --appendonly
       - "yes"
     ports:
-      - "${REDIS_HOST}:${REDIS_EXPOSE_PORT}:6379"
+      - "${REDIS_BIND_HOST}:${REDIS_PUBLISHED_PORT}:6379"
     networks:
       - vendor-network
     volumes:
@@ -22,18 +22,31 @@ services:
   postgres:
     image: ${POSTGRES_IMAGE}
     container_name: ${POSTGRES_CONTAINER_NAME}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=${POSTGRES_MAX_REPLICATION_SLOTS}
+      - -c
+      - max_wal_senders=${POSTGRES_MAX_WAL_SENDERS}
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      CORE_POSTGRES_DB: ${CORE_POSTGRES_DB}
+      IDENTITY_POSTGRES_DB: ${IDENTITY_POSTGRES_DB}
     ports:
-      - "${POSTGRES_HOST}:${POSTGRES_EXPOSE_PORT}:5432"
+      - "${POSTGRES_BIND_HOST}:${POSTGRES_PUBLISHED_PORT}:5432"
     networks:
       - vendor-network
     volumes:
       - postgres17_data:/var/lib/postgresql/data
       - ./helpers/db/create_db_psql.sh:/usr/local/bin/create_db_psql.sh:ro
       - ./helpers/db/create_db_psql.sql:/usr/local/bin/create_db_psql.sql:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: ${HEALTHCHECK_INTERVAL}
@@ -49,8 +62,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "${MINIO_HOST}:${MINIO_API_EXPOSE_PORT}:9000"
-      - "${MINIO_HOST}:${MINIO_CONSOLE_EXPOSE_PORT}:9001"
+      - "${MINIO_BIND_HOST}:${MINIO_API_PUBLISHED_PORT}:9000"
+      - "${MINIO_BIND_HOST}:${MINIO_CONSOLE_PUBLISHED_PORT}:9001"
     networks:
       - vendor-network
     volumes:
@@ -62,6 +75,126 @@ services:
       retries: ${HEALTHCHECK_RETRIES}
     restart: ${RESTART_POLICY}
 
+  minio-init:
+    image: ${MINIO_IMAGE}
+    container_name: ${MINIO_INIT_CONTAINER_NAME}
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/opt/wdl/minio-init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_AUDIT_BUCKET: ${MINIO_AUDIT_BUCKET}
+    networks:
+      - vendor-network
+    volumes:
+      - ./minio/init.sh:/opt/wdl/minio-init.sh:ro
+    restart: "no"
+
+  kafka:
+    image: ${KAFKA_IMAGE}
+    container_name: ${KAFKA_CONTAINER_NAME}
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:9093,PLAINTEXT://:9092,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://${KAFKA_ADVERTISED_HOST}:${KAFKA_PUBLISHED_PORT}
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+    ports:
+      - "${KAFKA_BIND_HOST}:${KAFKA_PUBLISHED_PORT}:9094"
+    networks:
+      - vendor-network
+    volumes:
+      - kafka_vendor_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+  kafka-init:
+    image: ${KAFKA_IMAGE}
+    container_name: ${KAFKA_INIT_CONTAINER_NAME}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/wdl/kafka-init.sh"]
+    environment:
+      KAFKA_AUDIT_TOPICS: ${KAFKA_AUDIT_TOPICS}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+    networks:
+      - vendor-network
+    volumes:
+      - ./kafka/init.sh:/opt/wdl/kafka-init.sh:ro
+    restart: "no"
+
+  debezium:
+    image: ${DEBEZIUM_CONNECT_IMAGE}
+    container_name: ${DEBEZIUM_CONTAINER_NAME}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: wdl-debezium
+      CONFIG_STORAGE_TOPIC: wdl-connect-configs
+      OFFSET_STORAGE_TOPIC: wdl-connect-offsets
+      STATUS_STORAGE_TOPIC: wdl-connect-statuses
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_CONFIG_PROVIDERS: env
+      CONNECT_CONFIG_PROVIDERS_ENV_CLASS: org.apache.kafka.common.config.provider.EnvVarConfigProvider
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${DEBEZIUM_BIND_HOST}:${DEBEZIUM_PUBLISHED_PORT}:8083"
+    networks:
+      - vendor-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8083/connectors >/dev/null"]
+      interval: ${HEALTHCHECK_INTERVAL}
+      timeout: ${HEALTHCHECK_TIMEOUT}
+      retries: ${HEALTHCHECK_RETRIES}
+    restart: ${RESTART_POLICY}
+
+  debezium-init:
+    image: ${DEBEZIUM_CONNECT_IMAGE}
+    container_name: ${DEBEZIUM_INIT_CONTAINER_NAME}
+    depends_on:
+      debezium:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/wdl/debezium/register-connectors.sh"]
+    environment:
+      DEBEZIUM_CONNECT_URL: http://debezium:8083
+      POSTGRES_HOSTNAME: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      CORE_POSTGRES_DB: ${CORE_POSTGRES_DB}
+      IDENTITY_POSTGRES_DB: ${IDENTITY_POSTGRES_DB}
+      DEBEZIUM_HEARTBEAT_INTERVAL_MS: ${DEBEZIUM_HEARTBEAT_INTERVAL_MS}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS}
+    networks:
+      - vendor-network
+    volumes:
+      - ./debezium:/opt/wdl/debezium:ro
+    restart: "no"
+
   clickhouse:
     image: ${CLICKHOUSE_IMAGE}
     container_name: ${CLICKHOUSE_CONTAINER_NAME}
@@ -70,13 +203,20 @@ services:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      CLICKHOUSE_COLD_STORAGE_ENDPOINT: http://minio:9000/${MINIO_AUDIT_BUCKET}/clickhouse/
     ports:
-      - "${CLICKHOUSE_HOST}:${CLICKHOUSE_HTTP_EXPOSE_PORT}:8123"
-      - "${CLICKHOUSE_HOST}:${CLICKHOUSE_NATIVE_EXPOSE_PORT}:9000"
+      - "${CLICKHOUSE_BIND_HOST}:${CLICKHOUSE_HTTP_PUBLISHED_PORT}:8123"
+      - "${CLICKHOUSE_BIND_HOST}:${CLICKHOUSE_NATIVE_PUBLISHED_PORT}:9000"
     networks:
       - vendor-network
     volumes:
       - clickhouse_vendor_data:/var/lib/clickhouse
+      - ./clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
         - CMD-SHELL
@@ -86,8 +226,33 @@ services:
       retries: ${HEALTHCHECK_RETRIES}
     restart: ${RESTART_POLICY}
 
+  clickhouse-init:
+    image: ${CLICKHOUSE_IMAGE}
+    container_name: ${CLICKHOUSE_INIT_CONTAINER_NAME}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "/opt/wdl/clickhouse-init.sh"]
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      KAFKA_AUDIT_TOPICS: ${KAFKA_AUDIT_TOPICS}
+      AUDIT_HOT_RETENTION_DAYS: ${AUDIT_HOT_RETENTION_DAYS}
+      AUDIT_TOTAL_RETENTION_DAYS: ${AUDIT_TOTAL_RETENTION_DAYS}
+      AUDIT_ERROR_RETENTION_DAYS: ${AUDIT_ERROR_RETENTION_DAYS}
+    networks:
+      - vendor-network
+    volumes:
+      - ./clickhouse/init.sh:/opt/wdl/clickhouse-init.sh:ro
+      - ./clickhouse/sql:/opt/wdl/sql:ro
+    restart: "no"
+
 networks:
   vendor-network:
+    external: true
     name: ${VENDOR_NETWORK_NAME}
 
 volumes:
@@ -99,3 +264,5 @@ volumes:
     name: ${MINIO_VOLUME_NAME}
   clickhouse_vendor_data:
     name: ${CLICKHOUSE_VOLUME_NAME}
+  kafka_vendor_data:
+    name: ${KAFKA_VOLUME_NAME}
